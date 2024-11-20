@@ -74,13 +74,12 @@ func (c *HealthInsurance) CreatePolicy(ctx contractapi.TransactionContextInterfa
 	// convert non-sensitive data to json format
 	policyJSON, err := json.Marshal(policy)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal policy: %v", err)
 	}
 
 	// store non-sensitive data in the ledger
-	err = ctx.GetStub().PutState(policyID, policyJSON)
-	if err != nil {
-		return err
+	if err := ctx.GetStub().PutState(policyID, policyJSON); err != nil {
+		return fmt.Errorf("failed to store policy: %v", err)
 	}
 
 	// sensitive data
@@ -91,13 +90,12 @@ func (c *HealthInsurance) CreatePolicy(ctx contractapi.TransactionContextInterfa
 	// store sensitive data in the private collection
 	privateDataJSON, err := json.Marshal(sensitiveData)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal sensitive data: %v", err)
 	}
 
 	// store sensitive data in the private collection using the policyID as the key
-	err = ctx.GetStub().PutPrivateData("medical-conditions-collection", policyID, privateDataJSON)
-	if err != nil {
-		return err
+	if err := ctx.GetStub().PutPrivateData("medical-conditions-collection", policyID, privateDataJSON); err != nil {
+		return fmt.Errorf("failed to store sensitive data: %v", err)
 	}
 
 	return nil
@@ -117,9 +115,8 @@ func (c *HealthInsurance) GetPolicy(ctx contractapi.TransactionContextInterface,
 
 	var policy Policy
 	// convert the JSON data to a policy struct
-	err = json.Unmarshal(policyJSON, &policy)
-	if err != nil {
-		return nil, err
+	if err := json.Unmarshal(policyJSON, &policy); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal policy: %v", err)
 	}
 
 	return &policy, nil
@@ -128,7 +125,7 @@ func (c *HealthInsurance) GetPolicy(ctx contractapi.TransactionContextInterface,
 // ///////////////////////////////
 // SUBMIT A CLAIM FOR A POLICY //
 // ///////////////////////////////
-func (c *HealthInsurance) SubmitClaim(ctx contractapi.TransactionContextInterface, policyID string, claimAmount int, claimReason string, hospitalName string, dateOfAdmission string, dateOfDischarge string, treatementDate string, documents string) error {
+func (c *HealthInsurance) SubmitClaim(ctx contractapi.TransactionContextInterface, policyID string, claimAmount int, claimReason string, hospitalName string, dateOfAdmission string, dateOfDischarge string, treatmentDate string, documents string) error {
 	// retrieve the policy details
 	policy, err := c.GetPolicy(ctx, policyID)
 	if err != nil {
@@ -143,6 +140,12 @@ func (c *HealthInsurance) SubmitClaim(ctx contractapi.TransactionContextInterfac
 	// update the claimed total
 	policy.ClaimedTotal += claimAmount
 
+	// get transaction timestamp
+	txTimestamp, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return fmt.Errorf("failed to get transaction timestamp: %v", err)
+	}
+
 	// log the claim details
 	claimDetails := map[string]string{
 		"policyID":        policyID,
@@ -151,9 +154,9 @@ func (c *HealthInsurance) SubmitClaim(ctx contractapi.TransactionContextInterfac
 		"hospitalName":    hospitalName,
 		"dateOfAdmission": dateOfAdmission,
 		"dateOfDischarge": dateOfDischarge,
-		"treatmentDate":   treatementDate,
+		"treatmentDate":   treatmentDate,
 		"documents":       documents,
-		"timestamp":       fmt.Sprintf("%d", ctx.GetStub().GetTxTimestamp().GetSeconds()),
+		"timestamp":       fmt.Sprintf("%d", txTimestamp.Seconds),
 	}
 
 	claimDetailsJSON, err := json.Marshal(claimDetails)
@@ -162,18 +165,19 @@ func (c *HealthInsurance) SubmitClaim(ctx contractapi.TransactionContextInterfac
 	}
 
 	// store the claim details in a private collection
-	err = ctx.GetStub().PutPrivateData("claims-collection", policyID, claimDetailsJSON)
+	if err := ctx.GetStub().PutPrivateData("claims-collection", policyID, claimDetailsJSON); err != nil {
+		return fmt.Errorf("failed to store claim details: %v", err)
+	}
 
 	// convert the updated policy struct to JSON format
 	policyJSON, err := json.Marshal(policy)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal updated policy: %v", err)
 	}
 
 	// store the updated policy in the ledger
-	err = ctx.GetStub().PutState(policyID, policyJSON)
-	if err != nil {
-		return err
+	if err := ctx.GetStub().PutState(policyID, policyJSON); err != nil {
+		return fmt.Errorf("failed to store updated policy: %v", err)
 	}
 
 	return nil
@@ -204,13 +208,12 @@ func (c *HealthInsurance) UpdatePolicy(ctx contractapi.TransactionContextInterfa
 	// convert the updated policy struct to JSON format
 	policyJSON, err := json.Marshal(policy)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal updated policy: %v", err)
 	}
 
 	// store the updated policy in the ledger
-	err = ctx.GetStub().PutState(policyID, policyJSON)
-	if err != nil {
-		return err
+	if err := ctx.GetStub().PutState(policyID, policyJSON); err != nil {
+		return fmt.Errorf("failed to store updated policy: %v", err)
 	}
 
 	return nil
@@ -221,39 +224,62 @@ func (c *HealthInsurance) UpdatePolicy(ctx contractapi.TransactionContextInterfa
 // ////////////////////////////////////////////////////////////////
 func (c *HealthInsurance) GetMedicalConditions(ctx contractapi.TransactionContextInterface, policyID string) (string, error) {
 	// get the client's identity
-	clientIdentity, err := ctx.GetClientIdentity()
-	if err != nil {
-		return "", fmt.Errorf("failed to get client identity: %v", err)
-	}
+	clientIdentity := ctx.GetClientIdentity()
 
 	// check permissions/role
-	role, err := clientIdentity.GetAttributeValue("role")
-	if err != nil || (role != "doctor" && role != "patient") {
-		return "", fmt.Errorf("user does not have permission to access medical conditions")
+	role, found, err := clientIdentity.GetAttributeValue("role")
+	if err != nil {
+		return "", fmt.Errorf("failed to get client role attribute: %v", err)
+	}
+
+	if !found {
+		return "", fmt.Errorf("client role attribute not found")
 	}
 
 	// ENSURE THAT ONLY AUTHORISED USERS CAN ACCESS SENSITIVE DATA
 	// Role-Based Access Control (RBAC)
+	if role != "doctor" && role != "patient" {
+		return "", fmt.Errorf("unauthorized access: only doctors or patients can access medical conditions")
+	}
+
+	clientID, err := clientIdentity.GetID()
+	if err != nil {
+		return "", fmt.Errorf("failed to get client ID: %v", err)
+	}
+
+	// only patient can access their own data
 	if role == "patient" {
+		clientID, err := ctx.GetClientIdentity().GetID()
+		if err != nil {
+			return "", fmt.Errorf("failed to get client ID: %v", err)
+		}
+
 		policy, err := c.GetPolicy(ctx, policyID)
 		if err != nil {
 			return "", err
 		}
 
-		if policy.PersonName != clientIdentity.GetID() {
+		if policy.PersonName != clientID {
 			return "", fmt.Errorf("user is not authorised to access medical data for this policy")
 		}
-	} else if role == "doctor" {
-		// doctors can access all medical data
-	} else {
-		return "", fmt.Errorf("user does not have permission to access medical conditions")
+		err = logAccessEvent(ctx, policyID, "accessed medical conditions", clientID)
+		if err != nil {
+			return "", fmt.Errorf("failed to log access event: %v", err)
+		}
 	}
 
+	txTimestamp, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return "", fmt.Errorf("failed to get transaction timestamp: %v", err)
+	}
+
+	timestampStr := txTimestamp.AsTime().String()
+
 	logEntry := map[string]string{
-		"userID":        clientIdentity.GetID(),
+		"userID":        clientID,
 		"role":          role,
 		"policyID":      policyID,
-		"timestamp":     fmt.Sprintf("%v", ctx.GetStub().GetTxTimestamp()),
+		"timestamp":     timestampStr,
 		"accessGranted": "true",
 	}
 
@@ -262,7 +288,6 @@ func (c *HealthInsurance) GetMedicalConditions(ctx contractapi.TransactionContex
 		return "", fmt.Errorf("failed to marshal access log: %v", err)
 	}
 
-	// store the access log
 	err = ctx.GetStub().PutPrivateData("access-log-collection", policyID, logEntryJSON)
 	if err != nil {
 		return "", fmt.Errorf("failed to store access log: %v", err)
@@ -281,9 +306,8 @@ func (c *HealthInsurance) GetMedicalConditions(ctx contractapi.TransactionContex
 
 	var sensitiveData map[string]string
 	err = json.Unmarshal(privateDataJSON, &sensitiveData)
-
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to unmarshal private data: %v", err)
 	}
 
 	return sensitiveData["medicalConditions"], nil
@@ -293,11 +317,19 @@ func (c *HealthInsurance) GetMedicalConditions(ctx contractapi.TransactionContex
 // LOG ACCESS EVENTS FOR AUDITING PURPOSES //
 // ///////////////////////////////////////////
 func logAccessEvent(ctx contractapi.TransactionContextInterface, policyID string, action string, userID string) error {
+	txTimestamp, err := ctx.GetStub().GetTxTimestamp()
+	if err != nil {
+		return fmt.Errorf("failed to get transaction timestamp: %v", err)
+	}
+
+	// Convert the timestamp to seconds
+	timestamp := fmt.Sprintf("%d", txTimestamp.GetSeconds())
+
 	accessLog := map[string]string{
 		"policyID":  policyID,
 		"action":    action,
 		"userID":    userID,
-		"timestamp": fmt.Sprintf("%d", ctx.GetStub().GetTxTimestamp().GetSeconds()),
+		"timestamp": timestamp,
 	}
 
 	logJSON, err := json.Marshal(accessLog)
